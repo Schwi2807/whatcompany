@@ -363,6 +363,90 @@ function openChecklist(id) {
   openSheet(c.name + ' – questions', body, { right: h('button', { class: 'btn primary', onclick: closeSheet }, 'Done') });
 }
 
+/* ---------- me ---------- */
+const PROFILE_FIELDS = [
+  ['name', 'Name', 'text', { autocapitalize: 'words' }],
+  ['matric', 'Matric no.', 'text', { autocapitalize: 'characters' }],
+  ['ic', 'IC no.', 'text', { inputmode: 'numeric' }],
+  ['email', 'Email', 'email', { autocapitalize: 'off', inputmode: 'email' }],
+  ['phone', 'Phone', 'tel', { inputmode: 'tel' }],
+  ['linkedin', 'LinkedIn', 'url', { autocapitalize: 'off', placeholder: 'linkedin.com/in/…' }],
+  ['university', 'University', 'text', {}],
+  ['programme', 'Programme', 'text', {}],
+  ['cgpa', 'CGPA', 'text', { inputmode: 'decimal' }],
+  ['grad', 'Graduation date', 'text', { placeholder: 'e.g. Aug 2026' }],
+];
+state.profile = { custom: [] };
+state.meEdit = false;
+state.persisted = null;
+
+async function copyText(t) {
+  try { await navigator.clipboard.writeText(t); }
+  catch (e) {
+    const ta = h('textarea', { value: t, readonly: true, style: 'position:fixed;top:0;left:0;opacity:0' });
+    document.body.append(ta); ta.select(); ta.setSelectionRange(0, t.length);
+    document.execCommand('copy'); ta.remove();
+  }
+  toast('Copied');
+}
+const saveProfile = () => DB.put('kv', state.profile, 'profile');
+
+function renderMe() {
+  const p = state.profile;
+  const v = $('#meView');
+  $('#meEdit').textContent = state.meEdit ? 'Done' : 'Edit';
+  $('#meEdit').classList.toggle('primary', state.meEdit);
+  const parts = [];
+  if (!state.meEdit) {
+    const chips = [
+      ...PROFILE_FIELDS.filter(([k]) => p[k]).map(([k, label]) => [label, p[k]]),
+      ...(p.custom || []).filter(x => x.value).map(x => [x.label || 'Custom', x.value]),
+    ].map(([label, val]) => h('button', { class: 'copy', onclick: () => copyText(val) },
+      h('span', { class: 'lbl' }, label), h('span', { class: 'val' }, val)));
+    parts.push(h('h2', null, 'Tap to copy'),
+      chips.length ? h('div', { class: 'copy-grid' }, chips) : h('p', { class: 'muted' }, 'Tap Edit to add your details.'));
+  } else {
+    const form = h('div', { class: 'form' }, PROFILE_FIELDS.map(([k, label, type, extra]) => {
+      const el = h('input', { type, value: p[k] || '', autocomplete: 'off', ...extra });
+      el.addEventListener('change', () => { p[k] = el.value.trim(); saveProfile(); });
+      return h('label', { class: 'field' }, label, el);
+    }));
+    const custom = h('div', { class: 'form' }, (p.custom || []).map(x => {
+      const l = h('input', { type: 'text', value: x.label, placeholder: 'Label', 'aria-label': 'Label' });
+      const val = h('input', { type: 'text', value: x.value, placeholder: 'Value', 'aria-label': 'Value' });
+      l.addEventListener('change', () => { x.label = l.value.trim(); saveProfile(); });
+      val.addEventListener('change', () => { x.value = val.value.trim(); saveProfile(); });
+      return h('div', { class: 'custom-row' }, l, val,
+        h('button', { class: 'btn ghost danger', 'aria-label': 'Remove field', onclick: async () => {
+          p.custom = p.custom.filter(y => y !== x); await saveProfile(); renderMe();
+        } }, '✕'));
+    }));
+    parts.push(h('h2', null, 'My details'), form,
+      h('h2', null, 'Custom fields'), custom,
+      h('div', { class: 'row', style: 'margin-top:10px' }, h('button', { class: 'btn', onclick: async () => {
+        p.custom = p.custom || [];
+        p.custom.push({ id: uid(), label: '', value: '' }); await saveProfile(); renderMe();
+        const rows = $$('#meView .custom-row input'); if (rows.length) rows[rows.length - 2].focus();
+      } }, '+ Add custom field')));
+  }
+
+  const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Theme' },
+    [['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([k, label]) =>
+      h('button', { 'aria-pressed': state.settings.theme === k, onclick: async () => { await setTheme(k); renderMe(); } }, label)));
+  parts.push(h('h2', null, 'Appearance'), seg);
+  if (typeof renderQrSettings === 'function') parts.push(h('h2', null, 'QR code'), renderQrSettings());
+  if (typeof renderDataPanel === 'function') parts.push(h('h2', null, 'Data'), renderDataPanel());
+  parts.push(h('p', { class: 'muted small' },
+    state.persisted === true ? 'Storage: persistent.' : state.persisted === false ? 'Storage: not marked persistent (browser may evict if space is low; keep a backup).' : ''));
+  v.replaceChildren(...parts);
+}
+renderers.me = renderMe;
+$('#meEdit').addEventListener('click', () => {
+  // let any focused input commit its change event first
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  state.meEdit = !state.meEdit; renderMe();
+});
+
 /* ---------- boot ---------- */
 async function boot() {
   await DB.open();
@@ -374,6 +458,10 @@ async function boot() {
   if (!(await DB.get('kv', 'seeded'))) {
     for (const t of SEED_QUESTIONS) await addQuestion(t);
     await DB.put('kv', true, 'seeded');
+  }
+  state.profile = Object.assign({ custom: [] }, await DB.get('kv', 'profile'));
+  if (navigator.storage && navigator.storage.persist) {
+    navigator.storage.persist().then(p => { state.persisted = p; if (state.tab === 'me') renderMe(); }).catch(() => {});
   }
   showTab('companies');
 }
