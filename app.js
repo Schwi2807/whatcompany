@@ -253,6 +253,116 @@ function editCompany(orig) {
 }
 $('#addCompany').addEventListener('click', () => editCompany());
 
+/* ---------- ask (questions) ---------- */
+state.questions = [];
+const SEED_QUESTIONS = [
+  'What does the first year look like for a graduate engineer here?',
+  'What kind of projects would a new graduate work on?',
+  'What training or mentoring do you give new engineers?',
+  'Which skills or tools do you value most in graduate hires?',
+  'What does the hiring process and timeline look like?',
+  'Are graduate or internship roles open now, and how should I apply?',
+];
+const sortedQuestions = () => [...state.questions].sort((a, b) => a.order - b.order);
+
+function askedCount(c) {
+  const ids = new Set(state.questions.map(q => q.id));
+  const asked = (c.asked || []).filter(id => ids.has(id)).length + (c.extra || []).filter(x => x.asked).length;
+  return `${asked}/${state.questions.length + (c.extra || []).length}`;
+}
+function askedTexts(c) {
+  const asked = new Set(c.asked || []);
+  return [...sortedQuestions().filter(q => asked.has(q.id)).map(q => q.text),
+    ...(c.extra || []).filter(x => x.asked).map(x => x.text)];
+}
+
+async function addQuestion(text) {
+  const q = { id: uid(), text, order: Math.max(0, ...state.questions.map(x => x.order)) + 1 };
+  await DB.put('questions', q);
+  state.questions.push(q);
+}
+
+function renderAsk() {
+  const v = $('#askView');
+  const companies = [...state.companies].sort((a, b) => a.name.localeCompare(b.name));
+  const pick = h('select', { 'aria-label': 'Company' },
+    h('option', { value: '' }, companies.length ? 'Choose a company…' : 'No companies yet'),
+    companies.map(c => h('option', { value: c.id }, `${c.name}  (${askedCount(c)})`)));
+  pick.addEventListener('change', () => { if (pick.value) openChecklist(pick.value); pick.value = ''; });
+
+  const list = h('div', { class: 'list' }, sortedQuestions().map(q => {
+    const inp = h('input', { type: 'text', value: q.text, 'aria-label': 'Question' });
+    inp.addEventListener('change', async () => {
+      const t = inp.value.trim();
+      if (!t) { inp.value = q.text; return; }
+      q.text = t; await DB.put('questions', q); toast('Saved');
+    });
+    return h('div', { class: 'item' }, inp,
+      h('button', { class: 'btn ghost danger', 'aria-label': 'Delete question', onclick: async () => {
+        if (!(await confirmBox(`Delete question "${q.text}"?`))) return;
+        await DB.del('questions', q.id);
+        state.questions = state.questions.filter(x => x.id !== q.id);
+        renderAsk();
+      } }, '✕'));
+  }));
+  const add = h('input', { type: 'text', placeholder: 'New question', enterkeyhint: 'done' });
+  const doAdd = async () => {
+    const t = add.value.trim(); if (!t) return;
+    await addQuestion(t); renderAsk(); toast('Added');
+  };
+  add.addEventListener('keydown', (e) => { if (e.key === 'Enter') doAdd(); });
+
+  v.replaceChildren(
+    h('h2', null, 'Checklist for a company'),
+    pick,
+    h('p', { class: 'muted small' }, 'Or tap "Questions" on a company card.'),
+    h('h2', null, 'Prepared questions'),
+    state.questions.length ? list : h('p', { class: 'muted' }, 'No questions yet.'),
+    h('div', { class: 'addrow' }, add, h('button', { class: 'btn primary', onclick: doAdd }, 'Add')));
+}
+renderers.ask = renderAsk;
+
+function openChecklist(id) {
+  const c = state.companies.find(x => x.id === id);
+  if (!c) return;
+  c.asked = c.asked || []; c.extra = c.extra || [];
+  const body = h('div');
+  const checkRow = (text, checked, onToggle, onDelete) => {
+    const cb = h('input', { type: 'checkbox' });
+    cb.checked = checked;
+    const lab = h('label', { class: 'check' + (checked ? ' done' : '') }, cb, h('span', { class: 'txt' }, text));
+    cb.addEventListener('change', async () => { lab.classList.toggle('done', cb.checked); await onToggle(cb.checked); });
+    return h('div', { class: 'item' }, lab,
+      onDelete ? h('button', { class: 'btn ghost danger', 'aria-label': 'Delete', onclick: onDelete }, '✕') : null);
+  };
+  const paint = () => {
+    const add = h('input', { type: 'text', placeholder: 'Question only for ' + c.name, enterkeyhint: 'done' });
+    const doAdd = async () => {
+      const t = add.value.trim(); if (!t) return;
+      c.extra.push({ id: uid(), text: t, asked: false });
+      await saveCompany(c); paint();
+    };
+    add.addEventListener('keydown', (e) => { if (e.key === 'Enter') doAdd(); });
+    body.replaceChildren(
+      h('h2', null, 'Prepared questions'),
+      state.questions.length ? h('div', { class: 'list' }, sortedQuestions().map(q => checkRow(q.text, c.asked.includes(q.id), async (on) => {
+        c.asked = c.asked.filter(x => x !== q.id);
+        if (on) c.asked.push(q.id);
+        await saveCompany(c);
+      }))) : h('p', { class: 'muted' }, 'Add prepared questions in the Ask tab.'),
+      h('h2', null, 'Only for ' + c.name),
+      c.extra.length ? h('div', { class: 'list' }, c.extra.map(x => checkRow(x.text, x.asked, async (on) => {
+        x.asked = on; await saveCompany(c);
+      }, async () => {
+        c.extra = c.extra.filter(y => y.id !== x.id); await saveCompany(c); paint();
+      }))) : null,
+      h('div', { class: 'addrow' }, add, h('button', { class: 'btn primary', onclick: doAdd }, 'Add')));
+  };
+  paint();
+  state.onSheetClose = () => { if (renderers[state.tab]) renderers[state.tab](); };
+  openSheet(c.name + ' – questions', body, { right: h('button', { class: 'btn primary', onclick: closeSheet }, 'Done') });
+}
+
 /* ---------- boot ---------- */
 async function boot() {
   await DB.open();
@@ -260,6 +370,11 @@ async function boot() {
   if (s) Object.assign(state.settings, s);
   applyTheme();
   state.companies = await DB.all('companies');
+  state.questions = await DB.all('questions');
+  if (!(await DB.get('kv', 'seeded'))) {
+    for (const t of SEED_QUESTIONS) await addQuestion(t);
+    await DB.put('kv', true, 'seeded');
+  }
   showTab('companies');
 }
 boot().catch(err => { console.error(err); toast('Storage error: ' + err.message); });
