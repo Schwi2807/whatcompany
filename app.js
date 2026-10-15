@@ -665,6 +665,113 @@ function renderQrSettings() {
   return panel;
 }
 
+/* ---------- export / import ---------- */
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const stamp = () => new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
+const blobToDataUrl = (b) => new Promise((res, rej) => {
+  const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(r.error); r.readAsDataURL(b);
+});
+function dataUrlToBlob(u) {
+  const [head, b64] = u.split(',');
+  const type = (head.match(/data:([^;]+)/) || [])[1] || 'application/octet-stream';
+  const bin = atob(b64), arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return new Blob([arr], { type });
+}
+
+// Shows a sheet with Share / Download so the share call gets a fresh tap (iOS needs a user gesture).
+function offerFile(blob, name) {
+  const file = new File([blob], name, { type: blob.type });
+  const canShare = isIOS && navigator.canShare && navigator.canShare({ files: [file] });
+  const download = () => {
+    const a = h('a', { href: URL.createObjectURL(blob), download: name });
+    document.body.append(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 5000);
+  };
+  openSheet('Export', h('div', { class: 'form' },
+    h('p', { style: 'margin:0' }, h('b', null, name), ` (${Math.max(1, Math.round(blob.size / 1024))} KB)`),
+    canShare ? h('button', { class: 'btn primary block', onclick: async () => {
+      try { await navigator.share({ files: [file] }); closeSheet(); }
+      catch (e) { if (e.name !== 'AbortError') toast('Share failed: ' + e.message); }
+    } }, 'Share / Save to Files') : null,
+    h('button', { class: 'btn block' + (canShare ? '' : ' primary'), onclick: download }, 'Download')));
+}
+
+async function exportJson() {
+  let cv = null;
+  if (state.cv) cv = { ...state.cv, files: await Promise.all(state.cv.files.map(async f => ({ name: f.name, type: f.type, data: await blobToDataUrl(f.blob) }))) };
+  const data = {
+    app: 'WhatCompany', version: 1, exported: new Date().toISOString(),
+    companies: state.companies, questions: state.questions, profile: state.profile,
+    qr: state.qr, settings: state.settings, cv,
+  };
+  offerFile(new Blob([JSON.stringify(data, null, 1)], { type: 'application/json' }), `whatcompany-backup-${stamp()}.json`);
+}
+
+function exportCsv() {
+  const cols = ['Name', 'Booth', 'Contact', 'Email', 'Phone', 'Role', 'Interest', 'Status', 'Notes', 'Asked questions', 'Not asked', 'Created', 'Updated'];
+  const q = (v) => '"' + String(v ?? '').replace(/"/g, '""') + '"';
+  const rows = [...state.companies].sort((a, b) => a.created - b.created).map(c => {
+    const asked = askedTexts(c);
+    const all = [...sortedQuestions().map(x => x.text), ...(c.extra || []).map(x => x.text)];
+    return [c.name, c.booth, c.contact, c.email, c.phone, c.role, c.interest || '', c.status, c.notes,
+      asked.join(' | '), all.filter(t => !asked.includes(t)).join(' | '),
+      new Date(c.created).toLocaleString(), new Date(c.updated || c.created).toLocaleString()].map(q).join(',');
+  });
+  offerFile(new Blob(['﻿' + [cols.map(q).join(','), ...rows].join('\r\n')], { type: 'text/csv' }), `whatcompany-companies-${stamp()}.csv`);
+}
+
+function importJson() {
+  const input = h('input', { type: 'file', style: 'display:none' });
+  input.addEventListener('change', async () => {
+    const f = input.files[0]; input.remove();
+    if (!f) return;
+    let d;
+    try { d = JSON.parse(await f.text()); } catch (e) { toast('Not a valid JSON file'); return; }
+    if (!d || d.app !== 'WhatCompany' || !Array.isArray(d.companies)) { toast('Not a WhatCompany backup'); return; }
+    const when = d.exported ? new Date(d.exported).toLocaleString() : 'unknown date';
+    if (!(await confirmBox(`Replace ALL data on this device with the backup from ${when} (${d.companies.length} companies)?`, 'Replace'))) return;
+    try {
+      await DB.clear('companies'); await DB.clear('questions');
+      for (const c of d.companies) await DB.put('companies', c);
+      for (const q of d.questions || []) await DB.put('questions', q);
+      await DB.put('kv', d.profile || { custom: [] }, 'profile');
+      if (d.qr) await DB.put('kv', d.qr, 'qr');
+      if (d.settings) await DB.put('kv', d.settings, 'settings');
+      if (d.cv && d.cv.files) {
+        await DB.put('kv', { ...d.cv, files: d.cv.files.map(x => ({ name: x.name, type: x.type, blob: dataUrlToBlob(x.data) })) }, 'cv');
+      } else await DB.del('kv', 'cv');
+      await DB.put('kv', true, 'seeded');
+      toast('Imported');
+      setTimeout(() => location.reload(), 600);
+    } catch (e) { console.error(e); toast('Import failed: ' + e.message); }
+  });
+  document.body.append(input);
+  input.click();
+}
+
+function renderDataPanel() {
+  return h('div', { class: 'panel' },
+    h('div', { class: 'row' },
+      h('button', { class: 'btn', onclick: exportJson }, 'Export backup (JSON)'),
+      h('button', { class: 'btn', onclick: importJson }, 'Import backup'),
+      h('button', { class: 'btn', onclick: exportCsv }, 'Export companies (CSV)')),
+    h('p', { class: 'muted small', style: 'margin:0' }, 'Everything is stored only on this device. Export a backup after the fair.'));
+}
+
+/* ---------- service worker ---------- */
+if ('serviceWorker' in navigator) {
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.register('sw.js').then(reg => {
+    reg.addEventListener('updatefound', () => {
+      const w = reg.installing;
+      w && w.addEventListener('statechange', () => {
+        if (w.state === 'activated' && hadController) toast('App updated. Close and reopen to use it.');
+      });
+    });
+  }).catch(err => console.warn('SW registration failed', err));
+}
+
 /* ---------- boot ---------- */
 async function boot() {
   await DB.open();
