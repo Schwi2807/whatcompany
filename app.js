@@ -447,6 +447,224 @@ $('#meEdit').addEventListener('click', () => {
   state.meEdit = !state.meEdit; renderMe();
 });
 
+/* ---------- CV ---------- */
+state.cv = null;      // { kind: 'images' | 'pdf', files: [{ name, type, blob }], updated }
+state.cvUrls = [];
+const CV_ACCEPT = 'image/*';
+
+function cvObjectUrls() {
+  if (!state.cvUrls.length && state.cv) state.cvUrls = state.cv.files.map(f => URL.createObjectURL(f.blob));
+  return state.cvUrls;
+}
+function resetCvUrls() { state.cvUrls.forEach(u => URL.revokeObjectURL(u)); state.cvUrls = []; }
+
+function pickCv() {
+  const input = h('input', { type: 'file', accept: CV_ACCEPT, multiple: true, style: 'display:none' });
+  input.addEventListener('change', async () => {
+    const files = [...input.files];
+    input.remove();
+    if (!files.length) return;
+    try { await storeCv(files); } catch (e) { console.error(e); toast('Could not save CV: ' + e.message); }
+  });
+  document.body.append(input);
+  input.click();
+}
+async function storeCv(files) {
+  const pdf = files.find(f => f.type === 'application/pdf' || /\.pdf$/i.test(f.name));
+  const imgs = files.filter(f => f.type.startsWith('image/'));
+  if (pdf && typeof renderPdfPages !== 'function') { toast('PDF not supported, use images'); return; }
+  const chosen = pdf ? [pdf] : imgs;
+  if (!chosen.length) { toast('Pick image files'); return; }
+  // copy into fresh Blobs so the stored value does not depend on the picked File handle
+  const list = await Promise.all(chosen.map(async f => ({ name: f.name, type: f.type || 'application/pdf', blob: new Blob([await f.arrayBuffer()], { type: f.type || 'application/pdf' }) })));
+  state.cv = { kind: pdf ? 'pdf' : 'images', files: list, updated: Date.now() };
+  await DB.put('kv', state.cv, 'cv');
+  resetCvUrls();
+  renderCv(); toast('CV saved');
+}
+
+async function cvPageNodes(forThumbs) {
+  if (!state.cv) return [];
+  if (state.cv.kind === 'pdf') return renderPdfPages(state.cv.files[0].blob, forThumbs);
+  return cvObjectUrls().map((u, i) => h('img', { src: u, alt: 'CV page ' + (i + 1), draggable: 'false' }));
+}
+
+async function renderCv() {
+  const v = $('#cvView');
+  if (!state.cv) {
+    v.replaceChildren(
+      h('h2', null, 'Your CV'),
+      h('p', { class: 'muted' }, 'Upload photos or screenshots of your CV pages (select several for multiple pages)' +
+        (typeof renderPdfPages === 'function' ? ', or a PDF.' : '.')),
+      h('button', { class: 'btn primary block', onclick: pickCv }, 'Upload CV'));
+    return;
+  }
+  const thumbs = h('div', { class: 'cv-thumbs' }, h('p', { class: 'muted' }, 'Loading…'));
+  v.replaceChildren(
+    h('h2', null, 'Your CV'),
+    h('p', { class: 'muted small' }, `${state.cv.kind === 'pdf' ? 'PDF' : state.cv.files.length + ' image(s)'} · saved ${new Date(state.cv.updated).toLocaleString()}`),
+    h('button', { class: 'btn primary block', onclick: openViewer }, 'View full screen'),
+    thumbs,
+    h('div', { class: 'row' },
+      h('button', { class: 'btn', onclick: pickCv }, 'Replace'),
+      h('button', { class: 'btn danger', onclick: async () => {
+        if (!(await confirmBox('Remove the stored CV from this device?', 'Remove'))) return;
+        await DB.del('kv', 'cv'); state.cv = null; resetCvUrls(); renderCv(); toast('CV removed');
+      } }, 'Remove')));
+  try {
+    const nodes = await cvPageNodes(true);
+    thumbs.replaceChildren(...nodes.map(n => h('button', { 'aria-label': 'Open CV', onclick: openViewer }, n)));
+  } catch (e) { console.error(e); thumbs.replaceChildren(h('p', { class: 'muted' }, 'Could not render CV: ' + e.message)); }
+}
+renderers.cv = renderCv;
+
+async function openViewer() {
+  const vw = $('#viewer');
+  const pages = h('div', { class: 'pages' });
+  const scroll = h('div', { class: 'scroll' }, pages);
+  let zoom = 1;
+  const setZoom = (z, cx, cy) => {
+    // cx, cy: point inside the scroll viewport that should stay fixed
+    z = Math.min(5, Math.max(1, z));
+    if (cx == null) { cx = scroll.clientWidth / 2; cy = scroll.clientHeight / 2; }
+    const k = z / zoom, x = scroll.scrollLeft + cx, y = scroll.scrollTop + cy;
+    zoom = z; pages.style.width = (z * 100) + '%';
+    scroll.scrollLeft = x * k - cx; scroll.scrollTop = y * k - cy;
+  };
+  vw.replaceChildren(
+    h('div', { class: 'head' },
+      h('button', { class: 'btn', onclick: closeViewer }, 'Close'),
+      h('span', null, 'CV'),
+      h('button', { class: 'btn', 'aria-label': 'Zoom out', onclick: () => setZoom(zoom / 1.5) }, '−'),
+      h('button', { class: 'btn', 'aria-label': 'Zoom in', onclick: () => setZoom(zoom * 1.5) }, '+')),
+    scroll);
+  vw.hidden = false;
+  pages.append(h('p', { style: 'color:#ccc;text-align:center' }, 'Loading…'));
+  try { pages.replaceChildren(...await cvPageNodes(false)); }
+  catch (e) { pages.replaceChildren(h('p', { style: 'color:#fff' }, 'Could not render CV: ' + e.message)); }
+
+  // pinch zoom (two fingers) + double-tap; one-finger scroll stays native
+  let pinch = null, lastTap = 0;
+  const rel = (t) => { const r = scroll.getBoundingClientRect(); return [t.clientX - r.left, t.clientY - r.top]; };
+  scroll.addEventListener('touchstart', (e) => {
+    if (e.touches.length === 2) {
+      const [a, b] = [rel(e.touches[0]), rel(e.touches[1])];
+      pinch = { d: Math.hypot(a[0] - b[0], a[1] - b[1]), z: zoom,
+        x: scroll.scrollLeft + (a[0] + b[0]) / 2, y: scroll.scrollTop + (a[1] + b[1]) / 2 };
+    }
+  }, { passive: true });
+  scroll.addEventListener('touchmove', (e) => {
+    if (!pinch || e.touches.length !== 2) return;
+    e.preventDefault();
+    const [a, b] = [rel(e.touches[0]), rel(e.touches[1])];
+    const z = Math.min(5, Math.max(1, pinch.z * Math.hypot(a[0] - b[0], a[1] - b[1]) / pinch.d));
+    const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2, k = z / pinch.z;
+    zoom = z; pages.style.width = (z * 100) + '%';
+    scroll.scrollLeft = pinch.x * k - mx; scroll.scrollTop = pinch.y * k - my;
+  }, { passive: false });
+  scroll.addEventListener('touchend', (e) => {
+    if (e.touches.length < 2) pinch = null;
+    if (e.touches.length === 0 && e.changedTouches.length === 1) {
+      const now = Date.now();
+      if (now - lastTap < 300) {
+        e.preventDefault(); touchDbl = now;
+        const [x, y] = rel(e.changedTouches[0]);
+        setZoom(zoom > 1.01 ? 1 : 2.5, x, y); lastTap = 0;
+      } else lastTap = now;
+    }
+  }, { passive: false });
+  let touchDbl = 0;
+  scroll.addEventListener('dblclick', (e) => {
+    if (Date.now() - touchDbl < 800) return;
+    const [x, y] = rel(e); setZoom(zoom > 1.01 ? 1 : 2.5, x, y);
+  });
+  scroll.addEventListener('touchmove', () => { lastTap = 0; }, { passive: true });
+}
+function closeViewer() { const v = $('#viewer'); v.hidden = true; v.replaceChildren(); }
+// stop Safari's own page zoom gestures inside the viewer / QR screen
+for (const id of ['#viewer', '#qrScreen']) $(id).addEventListener('gesturestart', (e) => e.preventDefault());
+
+/* ---------- QR ---------- */
+state.qr = { mode: 'vcard', name: '', email: '', phone: '', linkedin: '', includeLinkedin: true, url: '' };
+const saveQr = () => DB.put('kv', state.qr, 'qr');
+const qrField = (k) => (state.qr[k] || state.profile[k] || '').trim();
+const vEsc = (s) => s.replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/([,;])/g, '\\$1');
+const withScheme = (u) => /^[a-z]+:/i.test(u) ? u : 'https://' + u;
+
+function qrPayload() {
+  const q = state.qr;
+  if (q.mode === 'url') { const u = (q.url || '').trim(); return u ? { text: withScheme(u), cap: u, sub: '' } : null; }
+  const name = qrField('name'), email = qrField('email'), phone = qrField('phone'), li = qrField('linkedin');
+  if (!name && !email && !phone) return null;
+  const lines = ['BEGIN:VCARD', 'VERSION:3.0', `N:;${vEsc(name)};;;`, `FN:${vEsc(name)}`];
+  if (email) lines.push(`EMAIL;TYPE=INTERNET:${email}`);
+  if (phone) lines.push(`TEL;TYPE=CELL:${phone}`);
+  if (q.includeLinkedin && li) lines.push(`URL:${withScheme(li)}`);
+  lines.push('END:VCARD');
+  return { text: lines.join('\r\n'), cap: name || 'Contact', sub: [email, phone].filter(Boolean).join(' · ') };
+}
+
+function qrCanvas(text) {
+  qrcode.stringToBytes = qrcode.stringToBytesFuncs['UTF-8'];
+  const qr = qrcode(0, 'M');
+  qr.addData(text, 'Byte');
+  qr.make();
+  const n = qr.getModuleCount(), m = 4, k = 16, size = (n + m * 2) * k;
+  const cv = h('canvas', { class: 'qr', width: size, height: size, role: 'img', 'aria-label': 'QR code' });
+  const x = cv.getContext('2d');
+  x.fillStyle = '#fff'; x.fillRect(0, 0, size, size);
+  x.fillStyle = '#000';
+  for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (qr.isDark(r, c)) x.fillRect((c + m) * k, (r + m) * k, k, k);
+  return cv;
+}
+
+function showQr() {
+  const p = qrPayload();
+  if (!p) { toast(state.qr.mode === 'url' ? 'Set a URL in Me → QR code' : 'Add name/email/phone in Me'); return; }
+  const s = $('#qrScreen');
+  s.replaceChildren(
+    h('button', { class: 'btn', onclick: (e) => { e.stopPropagation(); closeQr(); } }, 'Close'),
+    qrCanvas(p.text),
+    h('div', { class: 'cap' }, p.cap),
+    p.sub ? h('div', { class: 'sub' }, p.sub) : null,
+    h('div', { class: 'sub' }, state.qr.mode === 'vcard' ? 'Scan with the camera to save my contact' : 'Scan with the camera'));
+  s.hidden = false;
+  s.onclick = closeQr;
+}
+function closeQr() { const s = $('#qrScreen'); s.hidden = true; s.replaceChildren(); }
+$('#showQr').addEventListener('click', showQr);
+
+function renderQrSettings() {
+  const q = state.qr;
+  const panel = h('div', { class: 'panel' });
+  const field = (k, label, type, extra = {}) => {
+    const el = h('input', { type, value: q[k] || '', placeholder: (state.profile[k] || '') || label, autocomplete: 'off', ...extra });
+    el.addEventListener('change', () => { q[k] = el.value.trim(); saveQr(); });
+    return h('label', { class: 'field' }, label, el);
+  };
+  const paint = () => {
+    const seg = h('div', { class: 'seg' }, [['vcard', 'Contact (vCard)'], ['url', 'URL']].map(([k, label]) =>
+      h('button', { 'aria-pressed': q.mode === k, onclick: () => { q.mode = k; saveQr(); paint(); } }, label)));
+    const kids = [seg];
+    if (q.mode === 'vcard') {
+      const cb = h('input', { type: 'checkbox' }); cb.checked = q.includeLinkedin;
+      cb.addEventListener('change', () => { q.includeLinkedin = cb.checked; saveQr(); });
+      kids.push(h('p', { class: 'muted small', style: 'margin:0' }, 'Blank fields use your details above.'),
+        h('div', { class: 'form' },
+          field('name', 'Name', 'text'),
+          h('div', { class: 'two' }, field('email', 'Email', 'email', { autocapitalize: 'off' }), field('phone', 'Phone', 'tel')),
+          field('linkedin', 'LinkedIn', 'url', { autocapitalize: 'off' }),
+          h('label', { class: 'check' }, cb, h('span', { class: 'txt' }, 'Include LinkedIn'))));
+    } else {
+      kids.push(field('url', 'URL (portfolio, LinkedIn, CV link…)', 'url', { autocapitalize: 'off' }));
+    }
+    kids.push(h('button', { class: 'btn primary', onclick: () => { document.activeElement.blur && document.activeElement.blur(); showQr(); } }, 'Show QR'));
+    panel.replaceChildren(...kids);
+  };
+  paint();
+  return panel;
+}
+
 /* ---------- boot ---------- */
 async function boot() {
   await DB.open();
@@ -460,6 +678,8 @@ async function boot() {
     await DB.put('kv', true, 'seeded');
   }
   state.profile = Object.assign({ custom: [] }, await DB.get('kv', 'profile'));
+  Object.assign(state.qr, await DB.get('kv', 'qr'));
+  state.cv = (await DB.get('kv', 'cv')) || null;
   if (navigator.storage && navigator.storage.persist) {
     navigator.storage.persist().then(p => { state.persisted = p; if (state.tab === 'me') renderMe(); }).catch(() => {});
   }

@@ -209,7 +209,7 @@ label.field > input, label.field > textarea, label.field > select { color: var(-
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px;
   padding: calc(var(--safe-t) + 16px) 16px calc(var(--safe-b) + 16px);
 }
-.qr-screen svg { width: min(82vw, 72vh); height: auto; }
+.qr-screen canvas.qr { width: min(82vw, 72vh); height: auto; image-rendering: pixelated; }
 .qr-screen .cap { font-size: 22px; font-weight: 700; text-align: center; }
 .qr-screen .sub { font-size: 15px; color: #555; text-align: center; overflow-wrap: anywhere; max-width: 90vw; }
 .qr-screen .btn { background: #f2f2f7; border-color: #ccc; color: #000; position: absolute; top: calc(var(--safe-t) + 12px); right: calc(var(--safe-r) + 12px); }
