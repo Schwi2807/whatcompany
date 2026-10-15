@@ -366,8 +366,8 @@ function openChecklist(id) {
 /* ---------- me ---------- */
 const PROFILE_FIELDS = [
   ['name', 'Name', 'text', { autocapitalize: 'words' }],
-  ['matric', 'Matric no.', 'text', { autocapitalize: 'characters' }],
-  ['ic', 'IC no.', 'text', { inputmode: 'numeric' }],
+  ['matric', 'Student ID', 'text', { autocapitalize: 'characters' }],
+  ['ic', 'ID no.', 'text', {}],
   ['email', 'Email', 'email', { autocapitalize: 'off', inputmode: 'email' }],
   ['phone', 'Phone', 'tel', { inputmode: 'tel' }],
   ['linkedin', 'LinkedIn', 'url', { autocapitalize: 'off', placeholder: 'linkedin.com/in/…' }],

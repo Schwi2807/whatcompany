@@ -1,5 +1,5 @@
 // Bump VERSION on every deploy so clients pick up new files.
-const VERSION = 'wc-v1';
+const VERSION = 'wc-v2';
 const ASSETS = [
   './', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest',
   'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png',
