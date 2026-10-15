@@ -5,7 +5,7 @@ Offline-first career-fair PWA (vanilla HTML/CSS/JS, no build step). All data sta
 ## Publish to GitHub Pages
 
 1. Push this folder to a GitHub repo (files at the repo root).
-2. Repo → Settings → Pages → Source: "Deploy from a branch", branch `main`, folder `/ (root)` → Save.
+2. Repo → Settings → Pages → Source: "Deploy from a branch", branch `master`, folder `/ (root)` → Save.
 3. Wait for the URL: `https://<user>.github.io/<repo>/`. All paths are relative, so the subpath works.
 4. On later deploys, bump `VERSION` in `sw.js` so installed copies update (they update on the next launch after that; close and reopen once more to see it).
 
