@@ -450,13 +450,60 @@ $('#meEdit').addEventListener('click', () => {
 /* ---------- CV ---------- */
 state.cv = null;      // { kind: 'images' | 'pdf', files: [{ name, type, blob }], updated }
 state.cvUrls = [];
-const CV_ACCEPT = 'image/*';
+const CV_ACCEPT = 'image/*,application/pdf,.pdf';
 
 function cvObjectUrls() {
   if (!state.cvUrls.length && state.cv) state.cvUrls = state.cv.files.map(f => URL.createObjectURL(f.blob));
   return state.cvUrls;
 }
-function resetCvUrls() { state.cvUrls.forEach(u => URL.revokeObjectURL(u)); state.cvUrls = []; }
+function resetCvUrls() {
+  state.cvUrls.forEach(u => URL.revokeObjectURL(u)); state.cvUrls = [];
+  if (state.pdfCache) { const p = state.pdfCache.urls; state.pdfCache = null; p.then(us => us.forEach(u => URL.revokeObjectURL(u)), () => {}); }
+}
+
+// PDF: pdf.js (vendored, lazy-loaded) renders every page once to a PNG; thumbs + viewer reuse them.
+let pdfLib = null;
+state.pdfCache = null;
+function loadPdfJs() {
+  if (!pdfLib) pdfLib = new Promise((res, rej) => {
+    const s = h('script', { src: 'vendor/pdf.min.js' });
+    s.onload = () => { window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'vendor/pdf.worker.min.js'; res(window.pdfjsLib); };
+    s.onerror = () => { pdfLib = null; s.remove(); rej(new Error('pdf.js failed to load')); };
+    document.head.append(s);
+  });
+  return pdfLib;
+}
+async function pdfToImageUrls(blob) {
+  const lib = await loadPdfJs();
+  const doc = await lib.getDocument({ data: new Uint8Array(await blob.arrayBuffer()), isEvalSupported: false }).promise;
+  const longSide = Math.max(screen.width || 0, screen.height || 0, innerWidth, innerHeight, 1024);
+  const target = Math.min(2000, Math.round(longSide * (window.devicePixelRatio || 1) * 1.25));
+  const urls = [];
+  try {
+    for (let i = 1; i <= doc.numPages; i++) {
+      const page = await doc.getPage(i);
+      const vp = page.getViewport({ scale: target / page.getViewport({ scale: 1 }).width });
+      const c = document.createElement('canvas');
+      c.width = Math.floor(vp.width); c.height = Math.floor(vp.height);
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+      await page.render({ canvasContext: ctx, viewport: vp }).promise;
+      const b = await new Promise(r => c.toBlob(r, 'image/png'));
+      if (!b) throw new Error('page ' + i + ' could not be rendered (too large?)');
+      urls.push(URL.createObjectURL(b));
+      c.width = c.height = 0; // free canvas memory (iOS caps total canvas memory)
+      page.cleanup();
+    }
+  } finally { doc.destroy(); }
+  return urls;
+}
+async function renderPdfPages(blob) {
+  const key = state.cv.updated;
+  if (!state.pdfCache || state.pdfCache.key !== key) state.pdfCache = { key, urls: pdfToImageUrls(blob) };
+  let urls;
+  try { urls = await state.pdfCache.urls; } catch (e) { state.pdfCache = null; throw e; }
+  return urls.map((u, i) => h('img', { src: u, alt: 'CV page ' + (i + 1), draggable: 'false' }));
+}
 
 function pickCv() {
   const input = h('input', { type: 'file', accept: CV_ACCEPT, multiple: true, style: 'display:none' });
